@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>IoT Sensor Dashboard</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<style>
+  :root { color-scheme: light dark; --bg:#f5f7fa; --card:#fff; --text:#1f2937; --muted:#6b7280; --line:#e5e7eb; --ok:#16a34a; --off:#9ca3af; --warn:#dc2626; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#0f172a; --card:#1e293b; --text:#e2e8f0; --muted:#94a3b8; --line:#334155; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; background:var(--bg); color:var(--text); }
+  header { display:flex; justify-content:space-between; align-items:center; padding:16px 24px; border-bottom:1px solid var(--line); }
+  h1 { font-size:20px; margin:0; }
+  #status { font-size:13px; color:var(--muted); }
+  #status.error { color:var(--warn); }
+  main { padding:24px; max-width:1100px; margin:0 auto; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(200px,1fr)); gap:16px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:16px; }
+  .name { font-weight:600; margin-bottom:8px; overflow-wrap:anywhere; }
+  .temp { font-size:28px; font-weight:700; }
+  .hum { color:var(--muted); margin-top:4px; }
+  .seen { font-size:12px; color:var(--muted); margin-top:10px; }
+  .dot { display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:6px; background:var(--off); }
+  .dot.online { background:var(--ok); }
+  section.chart { margin-top:32px; background:var(--card); border:1px solid var(--line); border-radius:12px; padding:16px; }
+  .controls { display:flex; gap:12px; align-items:center; margin-bottom:12px; flex-wrap:wrap; }
+  select { padding:6px 10px; border-radius:8px; border:1px solid var(--line); background:var(--bg); color:var(--text); }
+  .empty { color:var(--muted); padding:24px; text-align:center; }
+</style>
+</head>
+<body>
+<header>
+  <h1>IoT Sensor Dashboard</h1>
+  <span id="status">connecting...</span>
+</header>
+<main>
+  <div id="grid" class="grid"></div>
+  <div id="empty" class="empty" hidden>No sensors have reported yet. Start the ingest server and send some data.</div>
+
+  <section class="chart">
+    <div class="controls">
+      <label>Device <select id="device"></select></label>
+      <label>Range
+        <select id="range">
+          <option value="15">15 min</option>
+          <option value="60" selected>1 hour</option>
+          <option value="360">6 hours</option>
+          <option value="1440">24 hours</option>
+        </select>
+      </label>
+    </div>
+    <canvas id="chart" height="110"></canvas>
+  </section>
+</main>
+
+<script>
+const OFFLINE_AFTER_MS = 60_000;
+const POLL_MS = 3000;
+let chart = null;
+let knownDevices = [];
+
+function el(tag, cls, text) {
+  const node = document.createElement(tag);
+  if (cls) node.className = cls;
+  if (text !== undefined) node.textContent = text;   // textContent: device IDs cannot inject HTML
+  return node;
+}
+
+async function getJSON(url) {
+  const res = await fetch(url, { cache: "no-store" });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}
+
+function fmtAge(ms) {
+  const s = Math.max(0, Math.round(ms / 1000));
+  if (s < 60) return `${s}s ago`;
+  if (s < 3600) return `${Math.round(s / 60)}m ago`;
+  return `${Math.round(s / 3600)}h ago`;
+}
+
+function renderCards(latest) {
+  const grid = document.getElementById("grid");
+  const empty = document.getElementById("empty");
+  grid.replaceChildren();
+  empty.hidden = latest.length > 0;
+
+  for (const d of latest) {
+    const age = Date.now() - d.ts_ms;
+    const online = age < OFFLINE_AFTER_MS;
+
+    const seen = el("div", "seen");
+    seen.append(el("span", online ? "dot online" : "dot"), `${online ? "online" : "offline"} · ${fmtAge(age)}`);
+
+    const card = el("div", "card");
+    card.append(
+      el("div", "name", d.device_id),
+      el("div", "temp", `${d.temp_c.toFixed(1)} °C`),
+      el("div", "hum", `Humidity ${d.humidity.toFixed(1)} %`),
+      seen,
+    );
+    grid.append(card);
+  }
+}
+
+function updateDeviceList(latest) {
+  const ids = latest.map(d => d.device_id);
+  if (ids.join("|") === knownDevices.join("|")) return;   // only rebuild when the list changes
+  knownDevices = ids;
+  const select = document.getElementById("device");
+  const current = select.value;
+  select.replaceChildren(...ids.map(id => el("option", null, id)));
+  if (ids.includes(current)) select.value = current;
+}
+
+async function refreshChart() {
+  const device = document.getElementById("device").value;
+  if (!device) return;
+  const minutes = document.getElementById("range").value;
+  const rows = await getJSON(`/api/history?device_id=${encodeURIComponent(device)}&minutes=${minutes}`);
+
+  const labels = rows.map(r => new Date(r.ts_ms).toLocaleTimeString());
+  const datasets = [
+    { label: "Temperature (°C)", data: rows.map(r => r.temp_c), borderColor: "#f97316", yAxisID: "y", tension: 0.3, pointRadius: 0 },
+    { label: "Humidity (%)", data: rows.map(r => r.humidity), borderColor: "#38bdf8", yAxisID: "y1", tension: 0.3, pointRadius: 0 },
+  ];
+
+  if (!chart) {
+    chart = new Chart(document.getElementById("chart"), {
+      type: "line",
+      data: { labels, datasets },
+      options: {
+        animation: false,
+        interaction: { mode: "index", intersect: false },
+        scales: {
+          y: { position: "left", title: { display: true, text: "°C" } },
+          y1: { position: "right", title: { display: true, text: "%" }, grid: { drawOnChartArea: false } },
+        },
+      },
+    });
+  } else {
+    chart.data.labels = labels;
+    chart.data.datasets = datasets;
+    chart.update();
+  }
+}
+
+function setStatus(text, isError = false) {
+  const s = document.getElementById("status");
+  s.textContent = text;
+  s.classList.toggle("error", isError);
+}
+
+async function tick() {
+  try {
+    const latest = await getJSON("/api/latest");
+    renderCards(latest);
+    updateDeviceList(latest);
+    await refreshChart();
+    setStatus(`updated ${new Date().toLocaleTimeString()}`);
+  } catch (err) {
+    setStatus(`connection problem (${err.message})`, true);
+  }
+}
+
+function resetChart() {
+  if (chart) chart.destroy();   // a canvas can only hold one Chart.js instance
+  chart = null;
+  tick();
+}
+document.getElementById("device").addEventListener("change", resetChart);
+document.getElementById("range").addEventListener("change", resetChart);
+
+tick();
+setInterval(tick, POLL_MS);
+</script>
+</body>
+</html>
