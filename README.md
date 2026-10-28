@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="images.jpeg" width="100%" alt="Root-Hunter1 banner">
+  <img src="IMG_bc4a0277-427b-4b17-9f6e-c8f9d667c961.png" width="100%" alt="Root-Hunter1 banner">
 </p>
 
 # IoT Sensor Dashboard
